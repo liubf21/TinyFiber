@@ -48,14 +48,129 @@
 - 缺点
   - 无法利用多核资源
 
-## 协程的实现
+## 协程库实现
 
+ucontext 机制是 GNU C 提供的一组创建、保存、切换用户态执行上下文的 API，这是协程能够随时切换和恢复的关键。
 
+```c
+typedef struct ucontext {
+    struct ucontext *uc_link; // 后继上下文
+    sigset_t         uc_sigmask; // 信号屏蔽字
+    stack_t          uc_stack; // 栈信息
+    mcontext_t       uc_mcontext; // 平台相关的上下文具体内容，包含寄存器信息
+    ...
+} ucontext_t;
+
+// 获取当前上下文
+int getcontext(ucontext_t *ucp); 
+
+// 设置当前上下文，函数正常不会返回（失败才返回-1），而是跳转到 ucp 上下文对应的函数中执行，相当于函数调用
+int setcontext(const ucontext_t *ucp); 
+
+// 修改由 getcontext 获取的上下文，使其与 func 函数关联
+// 调用 makecontext 之前，必须手动设置 ucp->uc_stack，即给 ucp 分配一段内存空间作为栈
+// 可以指定 ucp->uc_link，使得 func 函数执行完毕后，自动跳转到 ucp->uc_link 对应的上下文
+// 如果不设置 ucp->uc_link，func 函数执行完毕后，必须调用 setcontext 或 swapcontext 重新制定一个有效的上下文，否则程序会跑飞
+// makecontext 调用后，可通过调用 setcontext 或 swapcontext 激活 ucp，执行 func 函数
+void makecontext(ucontext_t *ucp, void (*func)(), int argc, ...); 
+
+// 恢复 ucp 上下文，保存当前上下文到 oucp
+// 和 setcontext 一样，swapcontext 也不会返回，而是跳转到 ucp 上下文对应的函数中执行
+int swapcontext(ucontext_t *oucp, const ucontext_t *ucp);
+```
+
+一个简单的例子：
+
+```c
+// example.c
+#include <stdio.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+int main(int argc, const char *argv[]){
+    ucontext_t context;
+
+    getcontext(&context);
+    puts("Hello world");
+    sleep(1);
+    setcontext(&context);
+    return 0;
+}
+/*
+cxy@ubuntu:~$ gcc example.c -o example
+cxy@ubuntu:~$ ./example 
+Hello world
+Hello world
+Hello world
+Hello world
+Hello world
+Hello world
+Hello world
+^C
+cxy@ubuntu:~$
+*/
+```
+
+实现用户线程（协程）的过程：
+
+- 首先调用getcontext获得当前上下文
+- 修改当前上下文ucontext_t来指定新的上下文，如指定栈空间极其大小，设置用户线程执行完后返回的后继上下文（即主函数的上下文）等
+- 调用makecontext创建上下文，并指定用户线程中要执行的函数
+- 切换到用户线程上下文去执行用户线程（如果设置的后继上下文为主函数，则用户线程执行完后会自动返回主函数）。
+
+代码示例：
+
+```c
+#include <ucontext.h>
+#include <stdio.h>
+
+void func1(void * arg)
+{
+    puts("1");
+    puts("11");
+    puts("111");
+    puts("1111");
+
+}
+void context_test()
+{
+    char stack[1024*128];
+    ucontext_t child,main;
+
+    getcontext(&child); //获取当前上下文
+    child.uc_stack.ss_sp = stack;//指定栈空间
+    child.uc_stack.ss_size = sizeof(stack);//指定栈空间大小
+    child.uc_stack.ss_flags = 0;
+    child.uc_link = &main;//设置后继上下文
+
+    makecontext(&child,(void (*)(void))func1,0);//修改上下文指向func1函数
+
+    swapcontext(&main,&child);//切换到child上下文，保存当前上下文到main
+    puts("main");//如果设置了后继上下文，func1函数指向完后会返回此处
+}
+
+int main()
+{
+    context_test();
+
+    return 0;
+}
+```
+
+在具体实现中，用线程局部变量（C++11 thread_local）来保存协程的上下文（不同线程的协程相互不影响，每个线程要独自处理当前的协程切换问题）。
+
+在我当前的实现中，用两个线程局部变量（`t_fiber` 和 `t_thread_fiber`）来保存当前协程和主协程。
+
+设置了三种协程状态：就绪（READY）、运行（RUNNING）、结束（TERM）。
+
+对于非对称协程，除了创建语句，只有两种操作，resume（恢复协程运行）和 yield（让出执行）。
+
+协程调度（进程的调度算法：先来先服务、最短作业优先、最⾼响应⽐优先、时间⽚轮转等）
 
 ## TODO
 
 - [ ] 协程类的实现
-  - [ ] test1
+  - [x] 通过简单的协程调度器进行测试
 - [ ] 协程调度
 - [ ] 协程 + IO
 - [ ] 定时器
@@ -66,4 +181,5 @@
 - 游双《Linux⾼性能服务器编程》
 - 陈硕《Linux多线程服务端编程：使⽤muduo C++⽹络库》
 - 开源项目 https://github.com/sylar-yin/sylar
-- 教程 https://www.midlane.top/wiki/pages/viewpage.action?pageId=10060957
+- ucontext https://developer.aliyun.com/article/52886
+- sylar 协程模块 https://www.midlane.top/wiki/pages/viewpage.action?pageId=10060957
