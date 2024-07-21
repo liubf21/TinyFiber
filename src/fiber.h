@@ -10,6 +10,7 @@
 
 
 #define SYLAR_LOG_INFO std::cout << "[INFO] " << __FILE__ << ":" << __LINE__ << " "
+#define SYLAR_LOG_ERROR std::cout << "[ERROR] " << __FILE__ << ":" << __LINE__ << " "
 
 #define SYLAR_ASSERT(x) \
     if (!(x)) { \
